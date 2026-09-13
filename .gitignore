@@ -12,6 +12,10 @@
 
 # testing
 /coverage
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
 
 # next.js
 /.next/
@@ -40,13 +44,14 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# PWA build artifacts
+# PWA / Serwist build artifacts
 public/sw.js
 public/sw.js.map
 public/workbox-*.js
 public/workbox-*.js.map
 public/fallback-*.js
 public/fallback-*.js.map
+public/serwist/
 
 # Next.js generated agent notes
 AGENTS.md

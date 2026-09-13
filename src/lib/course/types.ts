@@ -17,7 +17,7 @@ export interface Stats {
   xp: number;
 }
 
-export type ThemeSetting = "dark" | "light";
+export type ThemeSetting = "system" | "dark" | "light";
 export type FontScaleSetting = "normal" | "large" | "xl";
 export type SpeechRateSetting = "slow" | "normal" | "fast";
 export type AccentSetting = "es-ES" | "es-MX";
@@ -66,12 +66,6 @@ export interface Dialogue {
   title: string;
   subtitle: string;
   turns: DialogueTurn[];
-}
-
-export interface SpeakingPhrase {
-  es: string;
-  gr: string;
-  focus: string;
 }
 
 export interface SentenceQuestion {
@@ -135,6 +129,7 @@ export interface QuizSession {
   score: { correct: number; total: number };
   streak: number;
   feedback: FeedbackState;
+  selectedAnswer: string | null;
   fillText: string;
   matchSelected: string | null;
   matchMatched: Set<string>;
@@ -152,21 +147,8 @@ export interface DialogueSession {
   index: number;
   selected: number | null;
   feedback: FeedbackState;
-  voice: SpeechResult | null;
+  choices: DialogueChoice[] | null;
   history: Array<{ prompt: DialogueTurn; choice: DialogueChoice }>;
-}
-
-export interface SpeakingSession {
-  index: number;
-  result: SpeechResult | null;
-  status: string;
-}
-
-export interface SpeechResult {
-  transcript?: string;
-  score?: number;
-  expected?: string;
-  error?: string;
 }
 
 export type CategoryModal = { type: "category"; color: string };
@@ -181,13 +163,4 @@ export interface ProgressBackup {
   stats: Stats;
   mistakes: VocabItem[];
   settings: Settings;
-}
-
-declare global {
-  interface Window {
-    SpeechRecognition?: typeof SpeechRecognition;
-    webkitSpeechRecognition?: typeof SpeechRecognition;
-    __spanishRecognition?: SpeechRecognition | null;
-    go?: (hash: string) => void;
-  }
 }

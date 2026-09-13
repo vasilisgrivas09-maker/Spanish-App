@@ -48,23 +48,6 @@ export function mistakeKey(item: VocabItem): string {
   return `${item.es}||${item.gr}`;
 }
 
-export function normalizeSpeech(value: string): string {
-  return normalizeAnswer(value)
-    .replace(/[¿?¡!.,;:]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-export function compareSpeech(spoken: string, expected: string): number {
-  const actualWords = normalizeSpeech(spoken).split(" ").filter(Boolean);
-  const targetWords = normalizeSpeech(expected).split(" ").filter(Boolean);
-  if (!targetWords.length) return 0;
-  const matched = targetWords.filter(
-    (word, index) => actualWords[index] === word || actualWords.includes(word),
-  ).length;
-  return Math.max(0, Math.min(100, Math.round((matched / targetWords.length) * 100)));
-}
-
 export function speechRateFromSetting(speechRate: "slow" | "normal" | "fast"): number {
   if (speechRate === "slow") return 0.62;
   if (speechRate === "fast") return 1.05;

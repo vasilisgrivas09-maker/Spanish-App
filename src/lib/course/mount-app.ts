@@ -1,37 +1,40 @@
 import {
   DIALOGUES,
-  ERROR_QUESTIONS,
-  GENDER_QUESTIONS,
   GRAMMAR_LESSONS,
   INITIAL_CATEGORIES,
   PRESET_COLORS,
-  SENTENCE_QUESTIONS,
-  SPEAKING_PHRASES,
   STORAGE_KEY_CATEGORIES,
   STORAGE_KEY_MISTAKES,
   STORAGE_KEY_SETTINGS,
   STORAGE_KEY_STATS,
-  TRAP_QUESTIONS,
   UNIT2_CATEGORIES,
   CATEGORY_ICONS,
 } from "./data";
-import { parseProgressBackup } from "./backup";
+import {
+  emptyAnalytics,
+  loadAnalyticsFromStorage,
+  quizzesToday,
+  recordQuizCompleted,
+  saveAnalyticsToStorage,
+  type AnalyticsState,
+} from "./analytics";
+import { parseProgressBackup, parseStoredCategories, parseStoredMistakes, parseStoredSettings, parseStoredStats } from "./backup";
+import { genQuestion } from "./quiz-generators";
+import { resolveTheme } from "./theme";
 import type {
   BaseQuizQuestion,
   Category,
+  DialogueChoice,
   DialogueSession,
   GrammarSession,
   ModalState,
   QuizSession,
   Settings,
-  SpeakingSession,
-  SpeechResult,
   Stats,
   VocabItem,
 } from "./types";
 import {
   clone,
-  compareSpeech,
   esc,
   generateId,
   mistakeKey,
@@ -53,17 +56,20 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
     let quizSession: QuizSession | null = null;
     let grammarSession: GrammarSession | null = null;
     let mistakes: VocabItem[] = [];
-    let settings: Settings = { theme: "dark", fontScale: "normal", speechRate: "normal", accent: "es-ES", oneHanded: false };
+    let settings: Settings = { theme: "system", fontScale: "normal", speechRate: "normal", accent: "es-ES", oneHanded: false };
     let dialogueSession: DialogueSession | null = null;
-    let speakingSession: SpeakingSession | null = null;
+    let analytics: AnalyticsState = emptyAnalytics();
+    let mediaQuery: MediaQueryList | null = null;
 
-                            function save(): void {
+    function save(): void {
       try {
         localStorage.setItem(STORAGE_KEY_CATEGORIES, JSON.stringify(categories));
         localStorage.setItem(STORAGE_KEY_STATS, JSON.stringify(stats));
         localStorage.setItem(STORAGE_KEY_MISTAKES, JSON.stringify(mistakes));
         localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
-      } catch {}
+      } catch {
+        alert("Δεν ήταν δυνατή η αποθήκευση της προόδου (πιθανό πρόβλημα χώρου/ιδιωτικής περιήγησης).");
+      }
     }
     function load(): void {
       try {
@@ -71,14 +77,27 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
         const storedStats = localStorage.getItem(STORAGE_KEY_STATS);
         const storedMistakes = localStorage.getItem(STORAGE_KEY_MISTAKES);
         if (storedCategories) {
-          const parsed = JSON.parse(storedCategories);
-          const parsedCategories = parsed as Category[]; categories = parsedCategories.some((cat: Category) => cat.unit === 2) ? parsedCategories : [...parsedCategories, ...clone(UNIT2_CATEGORIES)];
+          const parsedCategories = parseStoredCategories(JSON.parse(storedCategories) as unknown);
+          if (parsedCategories) {
+            categories = parsedCategories.some((cat) => cat.unit === 2)
+              ? parsedCategories
+              : [...parsedCategories, ...clone(UNIT2_CATEGORIES)];
+          }
         }
-        if (storedStats) stats = { ...stats, ...JSON.parse(storedStats) };
-        if (storedMistakes) mistakes = JSON.parse(storedMistakes);
+        if (storedStats) {
+          stats = parseStoredStats(JSON.parse(storedStats) as unknown, stats);
+        }
+        if (storedMistakes) {
+          mistakes = parseStoredMistakes(JSON.parse(storedMistakes) as unknown);
+        }
         const storedSettings = localStorage.getItem(STORAGE_KEY_SETTINGS);
-        if (storedSettings) settings = { ...settings, ...JSON.parse(storedSettings) };
-      } catch {}
+        if (storedSettings) {
+          settings = parseStoredSettings(JSON.parse(storedSettings) as unknown, settings);
+        }
+        analytics = loadAnalyticsFromStorage();
+      } catch {
+        // Keep defaults when storage is unreadable/corrupt.
+      }
       loaded = true;
       applySettings();
     }
@@ -86,10 +105,15 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
     function go(hash: string): void { location.hash = hash; }
     function closeModal(): void { modal = null; render(); }
     function applySettings(): void {
-      document.documentElement.dataset.theme = settings.theme === "light" ? "light" : "dark";
+      const resolved = resolveTheme(settings.theme);
+      document.documentElement.dataset.theme = resolved;
       document.documentElement.dataset.font = settings.fontScale === "xl" ? "xl" : settings.fontScale === "large" ? "large" : "normal";
       document.documentElement.dataset.oneHand = settings.oneHanded ? "true" : "false";
-      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", settings.theme === "light" ? "#f5f6fa" : "#070714");
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", resolved === "light" ? "#f5f6fa" : "#070714");
+    }
+    function trackQuizAnswer(): void {
+      analytics = recordQuizCompleted(analytics);
+      saveAnalyticsToStorage(analytics);
     }
         function speak(text: string): void {
       if (!("speechSynthesis" in window) || !text) return;
@@ -99,30 +123,7 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
       utterance.rate = speechRateFromSetting(settings.speechRate);
       window.speechSynthesis.speak(utterance);
     }
-    function speechRecognitionAvailable(): boolean {
-      return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
-    }
-    function startRecognition(expected: string, onDone: (result: SpeechResult) => void): void {
-      const RecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!RecognitionCtor) {
-        onDone({ error: "Ο browser δεν υποστηρίζει αναγνώριση ομιλίας. Δοκίμασε Chrome ή Edge." });
-        return;
-      }
-      if (window.__spanishRecognition) window.__spanishRecognition.abort();
-      const recognition = new RecognitionCtor();
-      window.__spanishRecognition = recognition;
-      recognition.lang = settings.accent || "es-ES";
-      recognition.interimResults = false;
-      recognition.maxAlternatives = 1;
-      recognition.onresult = (event: SpeechRecognitionEvent) => {
-        const transcript = event.results[0]?.[0]?.transcript ?? "";
-        onDone({ transcript, score: compareSpeech(transcript, expected), expected });
-      };
-      recognition.onerror = (event: SpeechRecognitionErrorEvent) => onDone({ error: event.error === "not-allowed" ? "Χρειάζεται άδεια για το μικρόφωνο." : "Δεν ακούστηκε καθαρά. Δοκίμασε ξανά." });
-      recognition.onend = () => { if (window.__spanishRecognition === recognition) window.__spanishRecognition = null; };
-      recognition.start();
-    }
-        function addMistake(item: VocabItem | undefined): void {
+    function addMistake(item: VocabItem | undefined): void {
       if (!item) return;
       if (!mistakes.some((entry) => mistakeKey(entry) === mistakeKey(item))) mistakes.push({ es: item.es, gr: item.gr });
     }
@@ -140,12 +141,11 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
     function render(): void {
       if (!loaded) return;
       const route = location.hash || "#home";
-      if (route.startsWith("#browse/")) renderBrowse(route.slice(7));
-      else if (route.startsWith("#quiz/")) renderQuiz(route.slice(6));
-      else if (route.startsWith("#grammar/")) renderGrammar(route.slice(9));
+      if (route.startsWith("#browse/")) renderBrowse(route.slice("#browse/".length));
+      else if (route.startsWith("#quiz/")) renderQuiz(route.slice("#quiz/".length));
+      else if (route.startsWith("#grammar/")) renderGrammar(route.slice("#grammar/".length));
       else if (route === "#dialogues") renderDialogues();
-      else if (route.startsWith("#dialogue/")) renderDialogue(route.slice(9));
-      else if (route === "#speaking") renderSpeaking();
+      else if (route.startsWith("#dialogue/")) renderDialogue(route.slice("#dialogue/".length));
       else if (route === "#settings") renderSettings();
       else renderHome();
     }
@@ -157,11 +157,26 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
       const all = totalWords(categories);
       const unitCount = totalWords(unitCats);
       const accuracy = stats.totalAnswered > 0 ? Math.round(stats.totalCorrect / stats.totalAnswered * 100) : null;
+      const unitExtras =
+        activeUnit === 1
+          ? `<div class="section-header" style="margin-top:24px"><span class="section-label">ΜΙΚΡΑ ΜΑΘΗΜΑΤΑ ΓΡΑΜΜΑΤΙΚΗΣ</span></div>
+            <div class="grammar-grid">${GRAMMAR_LESSONS.map((lesson) => `<button class="grammar-card" data-grammar="${lesson.id}"><span class="grammar-card-title">${lesson.title}</span><span class="grammar-card-sub">${lesson.subtitle}</span></button>`).join("")}</div>`
+          : `<div class="section-header" style="margin-top:24px"><span class="section-label">ΕΞΑΣΚΗΣΗ</span></div>
+            <div class="quick-grid">
+              <button class="quick-card" id="dialogues-link"><span class="quick-card-icon">💬</span><span class="quick-card-title">Μικροί διάλογοι</span><span class="quick-card-sub">Γραπτή εξάσκηση με απλό λεξιλόγιο</span></button>
+            </div>`;
       root.innerHTML = `
         <section class="screen">
           <header class="header">
             <div><h1 class="header-title"><span>Español</span> Course</h1><p class="header-sub">Το προσωπικό σου μάθημα</p></div>
-            <div class="header-right"><div class="xp-text">⚡ ${stats.xp} XP</div>${accuracy !== null ? `<div class="accuracy-text">${accuracy}% ακρίβεια</div>` : ""}<div class="words-text">${all} λέξεις σύνολο</div></div>
+            <div class="header-right">
+              <div class="xp-row">
+                <div class="xp-text">⚡ ${stats.xp} XP</div>
+                <button class="settings-gear" id="settings-link" type="button" aria-label="Ρυθμίσεις">⚙️</button>
+              </div>
+              ${accuracy !== null ? `<div class="accuracy-text">${accuracy}% ακρίβεια</div>` : ""}
+              <div class="words-text">${all} λέξεις σύνολο</div>
+            </div>
           </header>
           <div class="tabs">
             <button class="tab ${activeUnit === 1 ? "active" : ""}" data-unit="1"><span class="tab-title">Ενότητα 1</span><span class="tab-sub">${totalWords(categories.filter((c) => (c.unit || 1) === 1))} λέξεις</span></button>
@@ -171,16 +186,9 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
             <button class="big-button" id="unit-quiz"><span><span class="big-button-title">Quiz — Ενότητα ${activeUnit}</span><span class="big-button-sub">${unitCount} λέξεις · Όλοι οι τύποι ασκήσεων</span></span><span class="arrow">▶</span></button>
             <button class="all-button" id="all-quiz"><span>🌍 Quiz — Όλο το Λεξιλόγιο (${all} λέξεις)</span><span class="arrow">→</span></button>
             <button class="review-button" id="mistakes-quiz" ${mistakes.length ? "" : "disabled"}><span>↻ &nbsp; Επανάληψη λαθών (${mistakes.length})</span><span>→</span></button>
-             <div class="quick-grid">
-               <button class="quick-card" id="dialogues-link"><span class="quick-card-icon">💬</span><span class="quick-card-title">Μικροί διάλογοι</span><span class="quick-card-sub">Γραπτή και προφορική εξάσκηση</span></button>
-               <button class="quick-card" id="speaking-link"><span class="quick-card-icon">🎙️</span><span class="quick-card-title">Προφορική εξάσκηση</span><span class="quick-card-sub">Μίλησε και πάρε βαθμολογία</span></button>
-               <button class="quick-card" id="settings-link"><span class="quick-card-icon">⚙️</span><span class="quick-card-title">Ρυθμίσεις</span><span class="quick-card-sub">Θέμα, ήχος και προσβασιμότητα</span></button>
-               <button class="quick-card" id="backup-link"><span class="quick-card-icon">💾</span><span class="quick-card-title">Backup προόδου</span><span class="quick-card-sub">Export ή import αρχείου JSON</span></button>
-             </div>
             <div class="section-header"><span class="section-label">ΚΑΤΗΓΟΡΙΕΣ — ΕΝΟΤΗΤΑ ${activeUnit}</span><button class="round-button" id="add-category" aria-label="Προσθήκη κατηγορίας">+</button></div>
             ${unitCats.length ? unitCats.map(renderCategoryCard).join("") : `<div class="empty-state">Δεν υπάρχουν κατηγορίες ακόμα</div>`}
-            <div class="section-header" style="margin-top:24px"><span class="section-label">ΜΙΚΡΑ ΜΑΘΗΜΑΤΑ ΓΡΑΜΜΑΤΙΚΗΣ</span></div>
-            <div class="grammar-grid">${GRAMMAR_LESSONS.map((lesson) => `<button class="grammar-card" data-grammar="${lesson.id}"><span class="grammar-card-title">${lesson.title}</span><span class="grammar-card-sub">${lesson.subtitle}</span></button>`).join("")}</div>
+            ${unitExtras}
           </div></div>
         </section>
         ${modal ? renderCategoryModal() : ""}
@@ -189,10 +197,9 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
       el<HTMLButtonElement>("#unit-quiz").addEventListener("click", () => go("#quiz/unit" + activeUnit));
       el<HTMLButtonElement>("#all-quiz").addEventListener("click", () => go("#quiz/all"));
       el<HTMLButtonElement>("#mistakes-quiz").addEventListener("click", () => { if (mistakes.length) go("#quiz/mistakes"); });
-       el<HTMLButtonElement>("#dialogues-link").addEventListener("click", () => go("#dialogues"));
-       el<HTMLButtonElement>("#speaking-link").addEventListener("click", () => go("#speaking"));
-       el<HTMLButtonElement>("#settings-link").addEventListener("click", () => go("#settings"));
-       el<HTMLButtonElement>("#backup-link").addEventListener("click", exportProgress);
+      el<HTMLButtonElement>("#settings-link").addEventListener("click", () => go("#settings"));
+      const dialoguesLink = maybeEl<HTMLButtonElement>("#dialogues-link");
+      if (dialoguesLink) dialoguesLink.addEventListener("click", () => go("#dialogues"));
       el<HTMLButtonElement>("#add-category").addEventListener("click", () => { modal = { type: "category", color: PRESET_COLORS[0] ?? "#FF6B35" }; render(); });
       els<HTMLElement>("[data-browse]").forEach((button) => button.addEventListener("click", () => go("#browse/" + button.dataset.browse)));
       els<HTMLElement>("[data-quiz]").forEach((button) => button.addEventListener("click", () => go("#quiz/" + button.dataset.quiz)));
@@ -225,7 +232,11 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
     function renderBrowse(catId: string): void {
       quizSession = null;
       const cat = categories.find((item) => item.id === catId);
-      if (!cat) { root.innerHTML = `<section class="screen"><div class="empty-state">Κατηγορία δεν βρέθηκε<br><button class="quiz-button" onclick="go('#home')">Πίσω</button></div></section>`; return; }
+      if (!cat) {
+        root.innerHTML = `<section class="screen"><div class="empty-state">Κατηγορία δεν βρέθηκε<br><button class="quiz-button" id="missing-cat-home" style="color:var(--primary)">Πίσω</button></div></section>`;
+        el<HTMLButtonElement>("#missing-cat-home").addEventListener("click", () => go("#home"));
+        return;
+      }
       const query = browseSearch.trim().toLowerCase();
       const filtered = query ? cat.items.filter((item) => item.es.toLowerCase().includes(query) || item.gr.toLowerCase().includes(query)) : cat.items;
       root.innerHTML = `
@@ -280,72 +291,25 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
       const cat = categories.find((item) => item.id === catId);
       return cat ? cat.items : [];
     }
-    function genQuestion(pool: VocabItem[]): BaseQuizQuestion {
-      if (!pool.length) return { type: "fill", prompt: "Δεν υπάρχουν λέξεις", answer: "", direction: "es2gr" };
-      if (pool.length < 4) return genFill(pool);
-      const type = ["mc", "mc", "fill", "match", "listen", "type", "sentence", "error", "gender", "trap"][Math.floor(Math.random() * 10)];
-      if (type === "mc") return genMC(pool);
-      if (type === "match") return genMatch(pool);
-      if (type === "listen") return genListen(pool);
-      if (type === "type") return genTyping(pool);
-      if (type === "sentence") return genSentence();
-      if (type === "error") return genError();
-      if (type === "gender") return genGender();
-      if (type === "trap") return genTrap();
-      return genFill(pool);
-    }
-    function genMC(pool: VocabItem[]): BaseQuizQuestion {
-      const item = pool[Math.floor(Math.random() * pool.length)];
-      const direction = Math.random() > .5 ? "es2gr" : "gr2es";
-      const from = direction === "es2gr" ? "es" : "gr", to = direction === "es2gr" ? "gr" : "es";
-      const others = shuffle(pool.filter((entry) => entry[to] !== item[to])).slice(0, 3);
-      return { type:"mc", prompt:item[from], answer:item[to], options:shuffle([item[to], ...others.map((entry) => entry[to])]), direction, item };
-    }
-    function genFill(pool: VocabItem[]): BaseQuizQuestion {
-      const item = pool[Math.floor(Math.random() * pool.length)];
-      const direction = Math.random() > .5 ? "es2gr" : "gr2es";
-      const from = direction === "es2gr" ? "es" : "gr", to = direction === "es2gr" ? "gr" : "es";
-      return { type:"fill", prompt:item[from], answer:item[to], direction, item };
-    }
-    function genTyping(pool: VocabItem[]): BaseQuizQuestion {
-      const item = pool[Math.floor(Math.random() * pool.length)];
-      const direction = Math.random() > .5 ? "gr2es" : "es2gr";
-      const from = direction === "es2gr" ? "es" : "gr", to = direction === "es2gr" ? "gr" : "es";
-      return { type:"type", prompt:item[from], answer:item[to], direction, item };
-    }
-    function genSentence(): BaseQuizQuestion {
-      const example = SENTENCE_QUESTIONS[Math.floor(Math.random() * SENTENCE_QUESTIONS.length)];
-      return { type:"sentence", prompt:example.prompt, answer:example.answer, direction:"gr2es", item:example.item };
-    }
-    function genError(): BaseQuizQuestion {
-      const example = ERROR_QUESTIONS[Math.floor(Math.random() * ERROR_QUESTIONS.length)];
-      return { type:"error", prompt:example.prompt, answer:example.answer, options:shuffle(example.options), direction:"gr2es", item:example.item };
-    }
-    function genGender(): BaseQuizQuestion {
-      const example = GENDER_QUESTIONS[Math.floor(Math.random() * GENDER_QUESTIONS.length)];
-      return { type:"gender", prompt:example.prompt, answer:example.answer, options:shuffle(example.options), direction:"gr2es", item:example.item };
-    }
-    function genTrap(): BaseQuizQuestion {
-      const example = TRAP_QUESTIONS[Math.floor(Math.random() * TRAP_QUESTIONS.length)];
-      return { type:"trap", prompt:example.prompt, answer:example.answer, options:shuffle(example.options), direction:"gr2es", item:example.item };
-    }
-    function genListen(pool: VocabItem[]): BaseQuizQuestion {
-      const item = pool[Math.floor(Math.random() * pool.length)];
-      const others = shuffle(pool.filter((entry) => entry.gr !== item.gr)).slice(0, 3);
-      return { type:"listen", prompt:item.es, answer:item.gr, options:shuffle([item.gr, ...others.map((entry) => entry.gr)]), direction:"es2gr", item };
-    }
-    function genMatch(pool: VocabItem[]): BaseQuizQuestion {
-      const seen = new Set(), items = [];
-      for (const item of shuffle(pool)) {
-        const key = normalizeAnswer(item.gr);
-        if (!seen.has(key)) { seen.add(key); items.push(item); }
-        if (items.length === 5) break;
-      }
-      return { type:"match", prompt:"", answer:"", direction:"es2gr", left:items.map((item) => item.es), right:shuffle(items.map((item) => item.gr)), pairs:items };
-    }
     function newQuizSession(catId: string): QuizSession {
       const pool = getPool(catId);
-      return { catId, question:genQuestion(pool), score:{correct:0,total:0}, streak:0, feedback:null, fillText:"", matchSelected:null, matchMatched:new Set() };
+      return {
+        catId,
+        question: genQuestion(pool),
+        score: { correct: 0, total: 0 },
+        streak: 0,
+        feedback: null,
+        selectedAnswer: null,
+        fillText: "",
+        matchSelected: null,
+        matchMatched: new Set(),
+      };
+    }
+    function optionFeedbackClass(session: QuizSession, option: string, answer: string): string {
+      if (!session.feedback) return "";
+      if (option === answer) return "correct";
+      if (option === session.selectedAnswer) return "wrong";
+      return "";
     }
     function renderQuiz(catId: string): void {
       if (catId === "mistakes" && !mistakes.length) {
@@ -361,25 +325,25 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
       const accent = cat ? cat.color : "#FF6B35";
       const quizTitle = catId === "mistakes" ? "Οι λέξεις που κάνω λάθος" : cat ? cat.name : "Όλες οι κατηγορίες";
       const accuracy = session.score.total ? Math.round(session.score.correct / session.score.total * 100) : null;
-      const progress = session.score.total ? session.score.correct / session.score.total * 100 : 0;
+      const progress = Math.min(100, session.score.total * 10);
       let body = "";
-      if (q.type === "mc") body = renderMC(q, session, accent);
+      if (q.type === "mc") body = renderMC(q, session);
       if (q.type === "fill") body = renderFill(q, session, accent);
       if (q.type === "type") body = renderTyping(q, session, accent);
       if (q.type === "sentence") body = renderTyping(q, session, accent);
       if (q.type === "error") body = renderChoice(q, session, "Διόρθωσε τη φράση");
       if (q.type === "gender") body = renderChoice(q, session, "Διάκριση γένους");
       if (q.type === "trap") body = renderChoice(q, session, "Πρόσεχε τις παρόμοιες λέξεις");
-      if (q.type === "match") body = renderMatch(q, session, accent);
-      if (q.type === "listen") body = renderListen(q, session, accent);
+      if (q.type === "match") body = renderMatch(q, session);
+      if (q.type === "listen") body = renderListen(q, session);
       root.innerHTML = `<section class="screen quiz-screen"><header class="sub-header"><button class="back-button" id="quiz-back">‹</button><div class="sub-header-center"><h1 class="sub-header-title">${esc(quizTitle)}</h1>${accuracy !== null ? `<p class="sub-header-sub">${accuracy}% ακρίβεια</p>` : ""}</div><div class="quiz-header-badges"><span class="badge correct">${session.score.correct}</span><span class="badge wrong">${session.score.total - session.score.correct}</span>${session.streak >= 3 ? `<span class="badge streak">${session.streak}x</span>` : ""}</div></header><div class="progress-bg"><div class="progress-fill" style="width:${progress}%;background:${esc(accent)}"></div></div><div class="scroll"><div class="question-wrap"><div class="question-card ${session.feedback ? session.feedback + "-bg" : ""}">${body}</div><div class="question-count">Ερώτηση #${session.score.total + 1}${session.score.total ? `  ·  ${session.score.correct}/${session.score.total} σωστές` : "  ·  Ξεκινάς!"}</div></div></div></section>`;
       el<HTMLButtonElement>("#quiz-back").addEventListener("click", () => go("#home"));
-      attachQuizEvents(q, accent);
+      attachQuizEvents(q);
     }
-    function renderMC(q: BaseQuizQuestion, session: QuizSession, _accent?: string): string {
+    function renderMC(q: BaseQuizQuestion, session: QuizSession): string {
       if (q.type === "match") return "";
       const label = q.direction === "es2gr" ? "Ισπανικά → Ελληνικά" : "Ελληνικά → Ισπανικά";
-      return `<div class="type-label">${label}</div><div class="prompt-box"><span class="prompt-text">${esc(q.prompt)}</span>${q.direction === "es2gr" ? `<button class="speaker-button" data-speak="${esc(q.prompt)}" aria-label="Άκουσε την προφορά">🔊</button>` : ""}</div><div class="options-grid">${(q.options ?? []).map((option) => `<button class="option-button ${session.feedback ? option === q.answer ? "correct" : "wrong" : ""}" data-answer="${esc(option)}" ${session.feedback ? "disabled" : ""}>${esc(option)}</button>`).join("")}</div>`;
+      return `<div class="type-label">${label}</div><div class="prompt-box"><span class="prompt-text">${esc(q.prompt)}</span>${q.direction === "es2gr" ? `<button class="speaker-button" data-speak="${esc(q.prompt)}" aria-label="Άκουσε την προφορά">🔊</button>` : ""}</div><div class="options-grid">${(q.options ?? []).map((option) => `<button class="option-button ${optionFeedbackClass(session, option, q.answer)}" data-answer="${esc(option)}" ${session.feedback ? "disabled" : ""}>${esc(option)}</button>`).join("")}</div>`;
     }
     function renderFill(q: BaseQuizQuestion, session: QuizSession, accent: string): string {
       if (q.type === "match") return "";
@@ -395,23 +359,26 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
     function renderChoice(q: BaseQuizQuestion, session: QuizSession, label: string): string {
       if (q.type === "match") return "";
       const options = q.options ?? [];
-      return `<div class="type-label">${label}</div><div class="prompt-box"><span class="prompt-text" style="font-size:21px">${esc(q.prompt)}</span></div><div class="options-grid">${options.map((option) => `<button class="option-button ${session.feedback ? option === q.answer ? "correct" : "wrong" : ""}" data-answer="${esc(option)}" ${session.feedback ? "disabled" : ""}>${esc(option)}</button>`).join("")}</div>`;
+      return `<div class="type-label">${label}</div><div class="prompt-box"><span class="prompt-text" style="font-size:21px">${esc(q.prompt)}</span></div><div class="options-grid">${options.map((option) => `<button class="option-button ${optionFeedbackClass(session, option, q.answer)}" data-answer="${esc(option)}" ${session.feedback ? "disabled" : ""}>${esc(option)}</button>`).join("")}</div>`;
     }
-    function renderListen(q: BaseQuizQuestion, session: QuizSession, accent: string): string {
+    function renderListen(q: BaseQuizQuestion, session: QuizSession): string {
       if (q.type === "match") return "";
       const options = q.options ?? [];
-      return `<div class="type-label">Άκουσε και επίλεξε</div><div class="prompt-box" style="flex-direction:column;gap:10px"><button class="speaker-button" data-speak="${esc(q.prompt)}" style="width:52px;height:52px;border-radius:50%;font-size:24px" aria-label="Άκουσε την ισπανική λέξη">🔊</button><span style="color:var(--muted);font-size:13px">Πάτησε το ηχείο για να ακούσεις τη λέξη</span></div><div class="options-grid">${options.map((option) => `<button class="option-button ${session.feedback ? option === q.answer ? "correct" : "wrong" : ""}" data-answer="${esc(option)}" ${session.feedback ? "disabled" : ""}>${esc(option)}</button>`).join("")}</div>`;
+      return `<div class="type-label">Άκουσε και επίλεξε</div><div class="prompt-box" style="flex-direction:column;gap:10px"><button class="speaker-button" data-speak="${esc(q.prompt)}" style="width:52px;height:52px;border-radius:50%;font-size:24px" aria-label="Άκουσε την ισπανική λέξη">🔊</button><span style="color:var(--muted);font-size:13px">Πάτησε το ηχείο για να ακούσεις τη λέξη</span></div><div class="options-grid">${options.map((option) => `<button class="option-button ${optionFeedbackClass(session, option, q.answer)}" data-answer="${esc(option)}" ${session.feedback ? "disabled" : ""}>${esc(option)}</button>`).join("")}</div>`;
     }
-    function renderMatch(q: BaseQuizQuestion, session: QuizSession, accent: string): string {
+    function renderMatch(q: BaseQuizQuestion, session: QuizSession): string {
       const left = q.left ?? [];
       const right = q.right ?? [];
       const pairs = q.pairs ?? [];
       return `<div class="type-label">Ταίριαξε τα ζευγάρια</div><div class="match-grid"><div class="match-col">${left.map((word: string) => { const matched = session.matchMatched.has(word); return `<button class="match-button ${matched ? "matched" : session.matchSelected === word ? "selected" : ""}" data-match-left="${esc(word)}" ${matched ? "disabled" : ""}>${esc(word)}</button>`; }).join("")}</div><div class="match-col">${right.map((gr: string) => { const pair = pairs.find((item: VocabItem) => item.gr === gr); const matched = pair ? session.matchMatched.has(pair.es) : false; return `<button class="match-button ${matched ? "matched" : ""}" data-match-right="${esc(gr)}" ${matched ? "disabled" : ""}>${esc(gr)}</button>`; }).join("")}</div></div><div class="match-progress">${session.matchMatched.size}/${pairs.length} ζευγάρια</div>`;
     }
-    function attachQuizEvents(q: BaseQuizQuestion, accent: string): void {
+    function attachQuizEvents(q: BaseQuizQuestion): void {
       const session = quizSession;
       if (!session) return;
-      els<HTMLElement>("[data-answer]").forEach((button) => button.addEventListener("click", () => flashFeedback(button.dataset.answer === q.answer)));
+      els<HTMLElement>("[data-answer]").forEach((button) => button.addEventListener("click", () => {
+        const answer = button.dataset.answer ?? "";
+        flashFeedback(answer === q.answer, answer);
+      }));
       attachSpeakerEvents();
       if (q.type === "listen" && !session.feedback) setTimeout(() => speak(q.prompt), 150);
       const fill = maybeEl<HTMLInputElement>("#fill-answer");
@@ -436,6 +403,7 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
           session.matchMatched.add(session.matchSelected); session.matchSelected = null;
           if (session.matchMatched.size === (q.pairs ?? []).length) {
             session.score.correct++; session.score.total++; session.streak++; stats.xp += 50; stats.totalCorrect++; stats.totalAnswered++;
+            trackQuizAnswer();
             (q.pairs ?? []).forEach((item: VocabItem) => resolveMistake(item));
             save();
             setTimeout(() => nextQuestion(), 500);
@@ -443,14 +411,18 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
         } else {
           addMistake(pair);
           session.matchSelected = null;
+          session.streak = 0;
+          stats.totalAnswered++;
+          trackQuizAnswer();
           save();
           renderQuiz(session.catId);
         }
       }));
     }
-    function flashFeedback(correct: boolean): void {
+    function flashFeedback(correct: boolean, selectedAnswer: string | null = null): void {
       const session = quizSession;
       if (!session || session.feedback) return;
+      session.selectedAnswer = selectedAnswer;
       session.feedback = correct ? "correct" : "wrong";
       session.score.total++;
       if (correct) {
@@ -461,18 +433,23 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
         addMistake(session.question.item);
       }
       stats.totalAnswered++; if (correct) stats.totalCorrect++;
+      trackQuizAnswer();
       save(); renderQuiz(session.catId);
       setTimeout(() => nextQuestion(), correct ? 600 : 1200);
     }
     function handleFill(): void {
       const session = quizSession;
       if (!session || session.feedback || !session.fillText.trim()) return;
-      flashFeedback(normalizeAnswer(session.fillText) === normalizeAnswer(session.question.answer));
+      flashFeedback(normalizeAnswer(session.fillText) === normalizeAnswer(session.question.answer), session.fillText);
     }
     function nextQuestion(): void {
       if (!quizSession) return;
       quizSession.question = genQuestion(getPool(quizSession.catId));
-      quizSession.feedback = null; quizSession.fillText = ""; quizSession.matchSelected = null; quizSession.matchMatched = new Set();
+      quizSession.feedback = null;
+      quizSession.selectedAnswer = null;
+      quizSession.fillText = "";
+      quizSession.matchSelected = null;
+      quizSession.matchMatched = new Set();
       renderQuiz(quizSession.catId);
     }
 
@@ -517,7 +494,7 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
     function renderDialogues(): void {
       quizSession = null;
       dialogueSession = null;
-      root.innerHTML = `<section class="screen"><header class="sub-header"><button class="back-button" id="dialogues-back">‹</button><div class="sub-header-center"><h1 class="sub-header-title">Μικροί διάλογοι</h1><p class="sub-header-sub">Γραπτή και προφορική εξάσκηση με απλό λεξιλόγιο</p></div></header><div class="scroll"><div class="content"><div class="lesson-card"><h2>Μίλησε σαν να είσαι εκεί</h2><p>Διάβασε τη φράση, άκουσε την προφορά και διάλεξε την απάντηση που ταιριάζει. Μετά μπορείς να την πεις και δυνατά.</p></div><div class="dialogue-grid">${DIALOGUES.map((dialogue) => `<button class="dialogue-card" data-dialogue="${dialogue.id}"><span class="dialogue-card-icon">${dialogue.icon}</span><span class="dialogue-card-title">${dialogue.title}</span><span class="dialogue-card-sub">${dialogue.subtitle} · ${dialogue.turns.length} βήματα</span></button>`).join("")}</div></div></div></section>`;
+      root.innerHTML = `<section class="screen"><header class="sub-header"><button class="back-button" id="dialogues-back">‹</button><div class="sub-header-center"><h1 class="sub-header-title">Μικροί διάλογοι</h1><p class="sub-header-sub">Γραπτή εξάσκηση με απλό λεξιλόγιο</p></div></header><div class="scroll"><div class="content"><div class="lesson-card"><h2>Σαν να είσαι εκεί</h2><p>Διάβασε τη φράση, άκουσε την προφορά και διάλεξε την απάντηση που ταιριάζει.</p></div><div class="dialogue-grid">${DIALOGUES.map((dialogue) => `<button class="dialogue-card" data-dialogue="${dialogue.id}"><span class="dialogue-card-icon">${dialogue.icon}</span><span class="dialogue-card-title">${dialogue.title}</span><span class="dialogue-card-sub">${dialogue.subtitle} · ${dialogue.turns.length} βήματα</span></button>`).join("")}</div></div></div></section>`;
       el<HTMLButtonElement>("#dialogues-back").addEventListener("click", () => go("#home"));
       els<HTMLElement>("[data-dialogue]").forEach((button) => button.addEventListener("click", () => go("#dialogue/" + button.dataset.dialogue)));
     }
@@ -526,89 +503,81 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
       quizSession = null;
       const dialogue = DIALOGUES.find((item) => item.id === dialogueId);
       if (!dialogue) { go("#dialogues"); return; }
-      if (!dialogueSession || dialogueSession.id !== dialogueId) dialogueSession = { id: dialogueId, index: 0, selected: null, feedback: null, voice: null, history: [] };
+      if (!dialogueSession || dialogueSession.id !== dialogueId) {
+        dialogueSession = { id: dialogueId, index: 0, selected: null, feedback: null, choices: null, history: [] };
+      }
       const session = dialogueSession;
       const current = dialogue.turns[session.index];
       const finished = !current;
-      const history = session.history.map((entry) => `<div class="bubble user"><span class="bubble-speaker">ΕΣΥ</span><div class="bubble-es">${esc(entry.choice.es)} <button class="speaker-button" data-speak="${esc(entry.choice.es)}" aria-label="Άκουσε την απάντηση">🔊</button></div><div class="bubble-gr">${esc(entry.choice.gr)}</div></div>`).join("");
-      let body = `<div class="conversation">${dialogue.turns.slice(0, session.index).map((turn, index) => `<div class="bubble other"><span class="bubble-speaker">${esc(turn.speaker)}</span><div class="bubble-es">${esc(turn.es)} <button class="speaker-button" data-speak="${esc(turn.es)}" aria-label="Άκουσε τη φράση">🔊</button></div><div class="bubble-gr">${esc(turn.gr)}</div></div>${history && session.history[index] ? `<div class="bubble user"><span class="bubble-speaker">ΕΣΥ</span><div class="bubble-es">${esc(session.history[index].choice.es)} <button class="speaker-button" data-speak="${esc(session.history[index].choice.es)}" aria-label="Άκουσε την απάντηση">🔊</button></div><div class="bubble-gr">${esc(session.history[index].choice.gr)}</div></div>` : ""}`).join("")}</div>`;
+      if (current && (!session.choices || session.choices.length !== current.choices.length)) {
+        session.choices = shuffle(current.choices.map((choice) => ({ ...choice })));
+      }
+      const activeChoices: DialogueChoice[] = session.choices ?? current?.choices ?? [];
+      const otherBubble = (turn: (typeof dialogue.turns)[number], showGreek: boolean): string =>
+        `<div class="bubble other"><span class="bubble-speaker">${esc(turn.speaker)}</span><div class="bubble-es">${esc(turn.es)} <button class="speaker-button" data-speak="${esc(turn.es)}" aria-label="Άκουσε τη φράση">🔊</button></div>${showGreek ? `<div class="bubble-gr">${esc(turn.gr)}</div>` : ""}</div>`;
+      const userBubble = (choice: { es: string; gr: string }, showGreek: boolean): string =>
+        `<div class="bubble user"><span class="bubble-speaker">ΕΣΥ</span><div class="bubble-es">${esc(choice.es)} <button class="speaker-button" data-speak="${esc(choice.es)}" aria-label="Άκουσε την απάντηση">🔊</button></div>${showGreek ? `<div class="bubble-gr">${esc(choice.gr)}</div>` : ""}</div>`;
+      let body = `<div class="conversation">${dialogue.turns.slice(0, session.index).map((turn, index) => {
+        const answered = session.history[index];
+        if (!answered) return otherBubble(turn, true);
+        return `${otherBubble(turn, true)}${userBubble(answered.choice, true)}`;
+      }).join("")}</div>`;
       if (finished) {
         body += `<div class="grammar-result"><h2>Διάλογος ολοκληρώθηκε!</h2><p>Έκανες εξάσκηση στη σκηνή «${esc(dialogue.title)}».</p><button class="grammar-next" id="dialogue-restart">Ξανά τον διάλογο</button><button class="grammar-next" id="dialogue-list" style="background:var(--secondary);color:var(--primary)">Άλλος διάλογος</button></div>`;
       } else {
-      body += `<div class="bubble other"><span class="bubble-speaker">${esc(current.speaker)}</span><div class="bubble-es">${esc(current.es)} <button class="speaker-button" data-speak="${esc(current.es)}" aria-label="Άκουσε τη φράση">🔊</button></div><div class="bubble-gr">${esc(current.gr)}</div></div><div class="dialogue-prompt"><h2>Τι θα απαντήσεις;</h2><div class="choice-list">${current.choices.map((choice, index) => `<button class="choice-button ${session.feedback ? choice.correct ? "correct" : session.selected === index ? "wrong" : "" : ""}" data-choice-index="${index}" ${session.feedback ? "disabled" : ""}><span class="choice-es">${esc(choice.es)}</span><span class="choice-gr">${esc(choice.gr)}</span></button>`).join("")}</div>${session.feedback ? `<p class="feedback-hint ${session.feedback}">${session.feedback === "correct" ? "Σωστή επιλογή!" : "Αυτή η απάντηση δεν ταιριάζει εδώ."}</p><div class="dialogue-actions"><button class="secondary-button" id="dialogue-speak-choice">🔊 Άκουσε την επιλογή</button><button class="secondary-button" id="dialogue-mic">🎙️ Πες την</button></div>${session.voice ? `<div class="speech-result"><strong>Αναγνώριση:</strong> ${esc(session.voice.transcript || session.voice.error || "")}${session.voice.score !== undefined ? `<br><span class="score-ring">${session.voice.score}%</span> ομοιότητα` : ""}</div>` : ""}<button class="grammar-next" id="dialogue-next">${session.index + 1 === dialogue.turns.length ? "Ολοκλήρωση" : "Επόμενο"} →</button>` : ""}</div>`;
+        const feedbackActions =
+          session.feedback === "correct"
+            ? `<div class="dialogue-actions"><button class="secondary-button" id="dialogue-speak-choice">🔊 Άκουσε την επιλογή</button></div><button class="grammar-next" id="dialogue-next">${session.index + 1 === dialogue.turns.length ? "Ολοκλήρωση" : "Επόμενο"} →</button>`
+            : session.feedback === "wrong"
+              ? `<button class="grammar-next" id="dialogue-retry">Δοκίμασε ξανά →</button>`
+              : "";
+        body += `${otherBubble(current, false)}<div class="dialogue-prompt"><h2>Τι θα απαντήσεις;</h2><div class="choice-list">${activeChoices.map((choice, index) => `<button class="choice-button ${session.feedback ? choice.correct ? "correct" : session.selected === index ? "wrong" : "" : ""}" data-choice-index="${index}" ${session.feedback ? "disabled" : ""}><span class="choice-es">${esc(choice.es)}</span></button>`).join("")}</div>${session.feedback ? `<p class="feedback-hint ${session.feedback}">${session.feedback === "correct" ? "Σωστή επιλογή!" : "Αυτή η απάντηση δεν ταιριάζει εδώ."}</p>${feedbackActions}` : ""}</div>`;
       }
       root.innerHTML = `<section class="screen"><header class="sub-header"><button class="back-button" id="dialogue-back">‹</button><div class="sub-header-center"><h1 class="sub-header-title">${dialogue.icon} ${esc(dialogue.title)}</h1><p class="sub-header-sub">Βήμα ${Math.min(session.index + 1, dialogue.turns.length)} από ${dialogue.turns.length}</p></div><button class="icon-button" id="dialogue-home" aria-label="Λίστα διαλόγων">☷</button></header><div class="scroll"><div class="question-wrap">${body}</div></div></section>`;
       el<HTMLButtonElement>("#dialogue-back").addEventListener("click", () => go("#dialogues"));
       el<HTMLButtonElement>("#dialogue-home").addEventListener("click", () => go("#dialogues"));
       attachSpeakerEvents();
       if (finished) {
-        el<HTMLButtonElement>("#dialogue-restart").addEventListener("click", () => { dialogueSession = { id: dialogueId, index: 0, selected: null, feedback: null, voice: null, history: [] }; renderDialogue(dialogueId); });
+        el<HTMLButtonElement>("#dialogue-restart").addEventListener("click", () => { dialogueSession = { id: dialogueId, index: 0, selected: null, feedback: null, choices: null, history: [] }; renderDialogue(dialogueId); });
         el<HTMLButtonElement>("#dialogue-list").addEventListener("click", () => go("#dialogues"));
         return;
       }
       els<HTMLElement>("[data-choice-index]").forEach((button) => button.addEventListener("click", () => {
-        if (!dialogueSession || !current) return;
+        if (!dialogueSession || !current || dialogueSession.feedback) return;
         const index = Number(button.dataset.choiceIndex);
-        const choice = current.choices[index];
+        const choice = (dialogueSession.choices ?? current.choices)[index];
         if (!choice) return;
         dialogueSession.selected = index;
         dialogueSession.feedback = choice.correct ? "correct" : "wrong";
-        dialogueSession.voice = null;
         stats.totalAnswered++;
         if (choice.correct) { stats.totalCorrect++; stats.xp += 8; }
         save(); renderDialogue(dialogueId);
       }));
       const next = maybeEl<HTMLButtonElement>("#dialogue-next");
       if (next) next.addEventListener("click", () => {
-        if (!dialogueSession || !current || dialogueSession.selected === null) return;
-        const selectedChoice = current.choices[dialogueSession.selected];
-        if (!selectedChoice) return;
+        if (!dialogueSession || !current || dialogueSession.selected === null || dialogueSession.feedback !== "correct") return;
+        const selectedChoice = (dialogueSession.choices ?? current.choices)[dialogueSession.selected];
+        if (!selectedChoice?.correct) return;
         dialogueSession.history.push({ prompt: current, choice: selectedChoice });
         dialogueSession.index++;
-        dialogueSession.selected = null; dialogueSession.feedback = null; dialogueSession.voice = null;
+        dialogueSession.selected = null;
+        dialogueSession.feedback = null;
+        dialogueSession.choices = null;
+        renderDialogue(dialogueId);
+      });
+      const retry = maybeEl<HTMLButtonElement>("#dialogue-retry");
+      if (retry) retry.addEventListener("click", () => {
+        if (!dialogueSession) return;
+        dialogueSession.selected = null;
+        dialogueSession.feedback = null;
         renderDialogue(dialogueId);
       });
       const speakChoice = maybeEl<HTMLButtonElement>("#dialogue-speak-choice");
       if (speakChoice) speakChoice.addEventListener("click", () => {
         if (!dialogueSession || !current || dialogueSession.selected === null) return;
-        const selectedChoice = current.choices[dialogueSession.selected];
+        const selectedChoice = (dialogueSession.choices ?? current.choices)[dialogueSession.selected];
         if (selectedChoice) speak(selectedChoice.es);
       });
-      const mic = maybeEl<HTMLButtonElement>("#dialogue-mic");
-      if (mic) mic.addEventListener("click", () => {
-        if (!dialogueSession || !current || dialogueSession.selected === null) return;
-        const selectedChoice = current.choices[dialogueSession.selected];
-        if (!selectedChoice) return;
-        mic.disabled = true; mic.textContent = "🎙️ Ακρόαση...";
-        startRecognition(selectedChoice.es, (result) => {
-          if (!dialogueSession) return;
-          dialogueSession.voice = result;
-          renderDialogue(dialogueId);
-        });
-      });
-    }
-
-    function renderSpeaking(): void {
-      quizSession = null;
-      if (!speakingSession) speakingSession = { index: 0, result: null, status: "" };
-      const activeSpeaking = speakingSession;
-      const phrase = SPEAKING_PHRASES[activeSpeaking.index % SPEAKING_PHRASES.length];
-      if (!phrase) return;
-      const result = activeSpeaking.result;
-      const focusText = phrase.focus === "rr" ? "rr / r" : phrase.focus;
-      root.innerHTML = `<section class="screen"><header class="sub-header"><button class="back-button" id="speaking-back">‹</button><div class="sub-header-center"><h1 class="sub-header-title">Προφορική εξάσκηση</h1><p class="sub-header-sub">Φράση ${activeSpeaking.index + 1} · εστίαση στον ήχο ${focusText}</p></div><button class="icon-button" id="speaking-list" aria-label="Επόμενη φράση">↻</button></header><div class="scroll"><div class="question-wrap"><div class="speech-card"><div class="type-label">Άκουσε · διάβασε · μίλησε</div><div class="speech-target">${esc(phrase.es)} <button class="speaker-button" data-speak="${esc(phrase.es)}" aria-label="Άκουσε τη φράση">🔊</button></div><div class="speech-translation">${esc(phrase.gr)}</div><button class="mic-button" id="start-mic" aria-label="Ξεκίνα την προφορική εξάσκηση">🎙️</button><div class="speech-status">${esc(activeSpeaking.status || (speechRecognitionAvailable() ? "Πάτησε το μικρόφωνο και διάβασε τη φράση." : "Η αναγνώριση ομιλίας δεν είναι διαθέσιμη σε αυτόν τον browser."))}</div>${result ? `<div class="speech-result"><strong>Ο browser άκουσε:</strong> ${esc(result.transcript || result.error || "")}${result.score !== undefined ? `<p><span class="score-ring">${result.score}%</span> ομοιότητα με τη φράση</p><small>Ο έλεγχος βασίζεται στη μεταγραφή του browser. Οι ήχοι ${esc(focusText)} χρειάζονται ιδιαίτερη προσοχή στην επόμενη προσπάθεια.</small>` : ""}</div><button class="grammar-next" id="next-speaking">Επόμενη φράση →</button>` : ""}</div><div class="lesson-card"><h2>Μικρό tip προφοράς</h2><p>Πες τη φράση αργά και καθαρά. Το αποτέλεσμα είναι ενδεικτικό, επειδή κάθε browser αναγνωρίζει την ομιλία με διαφορετικό τρόπο.</p></div></div></div></section>`;
-      el<HTMLButtonElement>("#speaking-back").addEventListener("click", () => go("#home"));
-      el<HTMLButtonElement>("#speaking-list").addEventListener("click", () => { if (!speakingSession) return; speakingSession.index = (speakingSession.index + 1) % SPEAKING_PHRASES.length; speakingSession.result = null; speakingSession.status = ""; renderSpeaking(); });
-      attachSpeakerEvents();
-      el<HTMLButtonElement>("#start-mic").addEventListener("click", () => {
-        if (!speakingSession) return;
-        speakingSession.status = "Ακούω… μίλησε τώρα.";
-        speakingSession.result = null;
-        renderSpeaking();
-        startRecognition(phrase.es, (recognitionResult) => { if (!speakingSession) return; speakingSession.result = recognitionResult; speakingSession.status = recognitionResult.error || "Η προσπάθεια ολοκληρώθηκε."; renderSpeaking(); });
-      });
-      const next = maybeEl<HTMLButtonElement>("#next-speaking");
-      if (next) next.addEventListener("click", () => { if (!speakingSession) return; speakingSession.index = (speakingSession.index + 1) % SPEAKING_PHRASES.length; speakingSession.result = null; speakingSession.status = ""; renderSpeaking(); });
     }
 
     function exportProgress(): void {
@@ -638,12 +607,13 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
     function renderSettings(): void {
       quizSession = null;
       root.innerHTML = `<section class="screen"><header class="sub-header"><button class="back-button" id="settings-back">‹</button><div class="sub-header-center"><h1 class="sub-header-title">Ρυθμίσεις</h1><p class="sub-header-sub">Προσωπική, προσβάσιμη εμπειρία μάθησης</p></div></header><div class="scroll"><div class="content"><div class="settings-list">
-        <div class="settings-row"><div class="settings-label"><strong>Θέμα εμφάνισης</strong><small>Επίλεξε σκοτεινό ή φωτεινό περιβάλλον.</small></div><select class="settings-select" id="setting-theme"><option value="dark" ${settings.theme === "dark" ? "selected" : ""}>Σκοτεινό</option><option value="light" ${settings.theme === "light" ? "selected" : ""}>Φωτεινό</option></select></div>
+        <div class="settings-row"><div class="settings-label"><strong>Θέμα εμφάνισης</strong><small>Προεπιλογή: σύμφωνα με το σύστημα (prefers-color-scheme).</small></div><select class="settings-select" id="setting-theme"><option value="system" ${settings.theme === "system" ? "selected" : ""}>Σύστημα</option><option value="dark" ${settings.theme === "dark" ? "selected" : ""}>Σκοτεινό</option><option value="light" ${settings.theme === "light" ? "selected" : ""}>Φωτεινό</option></select></div>
+        <div class="settings-row"><div class="settings-label"><strong>Quizzes σήμερα</strong><small>Τοπικό analytics — μόνο στη συσκευή σου.</small></div><span class="settings-toggle" aria-live="polite">${quizzesToday(analytics)}</span></div>
         <div class="settings-row"><div class="settings-label"><strong>Μέγεθος γραμματοσειράς</strong><small>Μεγαλύτερο κείμενο για πιο άνετη ανάγνωση.</small></div><select class="settings-select" id="setting-font"><option value="normal" ${settings.fontScale === "normal" ? "selected" : ""}>Κανονικό</option><option value="large" ${settings.fontScale === "large" ? "selected" : ""}>Μεγάλο</option><option value="xl" ${settings.fontScale === "xl" ? "selected" : ""}>Πολύ μεγάλο</option></select></div>
         <div class="settings-row"><div class="settings-label"><strong>Ταχύτητα προφοράς</strong><small>Αργή, κανονική ή γρήγορη ισπανική εκφώνηση.</small></div><select class="settings-select" id="setting-rate"><option value="slow" ${settings.speechRate === "slow" ? "selected" : ""}>Αργή</option><option value="normal" ${settings.speechRate === "normal" ? "selected" : ""}>Κανονική</option><option value="fast" ${settings.speechRate === "fast" ? "selected" : ""}>Γρήγορη</option></select></div>
-        <div class="settings-row"><div class="settings-label"><strong>Ισπανική προφορά</strong><small>Επηρεάζει την ακρόαση και την αναγνώριση φωνής.</small></div><select class="settings-select" id="setting-accent"><option value="es-ES" ${settings.accent === "es-ES" ? "selected" : ""}>Ισπανία</option><option value="es-MX" ${settings.accent === "es-MX" ? "selected" : ""}>Λατινική Αμερική</option></select></div>
+        <div class="settings-row"><div class="settings-label"><strong>Ισπανική προφορά</strong><small>Επηρεάζει την ακρόαση (TTS) στους διαλόγους και στα quizzes.</small></div><select class="settings-select" id="setting-accent"><option value="es-ES" ${settings.accent === "es-ES" ? "selected" : ""}>Ισπανία</option><option value="es-MX" ${settings.accent === "es-MX" ? "selected" : ""}>Λατινική Αμερική</option></select></div>
         <div class="settings-row"><div class="settings-label"><strong>Λειτουργία ενός χεριού</strong><small>Περισσότερος χώρος αφής και πιο άνετη χρήση στο κινητό.</small></div><button class="settings-toggle ${settings.oneHanded ? "on" : ""}" id="setting-one-hand">${settings.oneHanded ? "Ενεργή" : "Ανενεργή"}</button></div>
-      </div><div class="backup-row"><button class="backup-button" id="export-progress">⬇ Export JSON</button><button class="backup-button" id="import-progress">⬆ Import JSON</button></div><div class="lesson-card" style="margin-top:16px"><h2>Συμβατότητα μικροφώνου</h2><p>${speechRecognitionAvailable() ? "Ο browser σου υποστηρίζει αναγνώριση ομιλίας. Θα ζητήσει άδεια μικροφώνου όταν ξεκινήσεις." : "Για την προφορική αξιολόγηση χρησιμοποίησε Chrome ή Edge. Η ακρόαση με ηχεία λειτουργεί και χωρίς μικρόφωνο."}</p></div></div></div></section>`;
+      </div><div class="backup-row"><button class="backup-button" id="export-progress">⬇ Export JSON</button><button class="backup-button" id="import-progress">⬆ Import JSON</button></div></div></div></section>`;
       el<HTMLButtonElement>("#settings-back").addEventListener("click", () => go("#home"));
       el<HTMLSelectElement>("#setting-theme").addEventListener("change", (event) => { settings.theme = (event.target as HTMLSelectElement).value as Settings["theme"]; save(); applySettings(); renderSettings(); });
       el<HTMLSelectElement>("#setting-font").addEventListener("change", (event) => { settings.fontScale = (event.target as HTMLSelectElement).value as Settings["fontScale"]; save(); applySettings(); renderSettings(); });
@@ -661,20 +631,19 @@ let categories: Category[] = clone(INITIAL_CATEGORIES);
     render();
   };
 
+  const onSystemThemeChange = (): void => {
+    if (settings.theme === "system") applySettings();
+  };
+
   load();
+  mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  mediaQuery.addEventListener("change", onSystemThemeChange);
   window.addEventListener("hashchange", onHashChange);
-  window.go = go;
   render();
 
   return () => {
     window.removeEventListener("hashchange", onHashChange);
-    if (window.__spanishRecognition) {
-      window.__spanishRecognition.abort();
-      window.__spanishRecognition = null;
-    }
-    if (window.go === go) {
-      delete window.go;
-    }
+    mediaQuery?.removeEventListener("change", onSystemThemeChange);
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }

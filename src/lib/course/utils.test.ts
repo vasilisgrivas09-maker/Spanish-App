@@ -3,11 +3,9 @@ import { describe, expect, it } from "vitest";
 import { parseProgressBackup } from "@/lib/course/backup";
 import {
   clone,
-  compareSpeech,
   esc,
   mistakeKey,
   normalizeAnswer,
-  normalizeSpeech,
   shuffle,
   speechRateFromSetting,
   totalWords,
@@ -24,23 +22,6 @@ describe("normalizeAnswer", () => {
 describe("esc", () => {
   it("escapes HTML special characters", () => {
     expect(esc(`<a href="x">'&</a>`)).toBe("&lt;a href=&quot;x&quot;&gt;&#039;&amp;&lt;/a&gt;");
-  });
-});
-
-describe("compareSpeech", () => {
-  it("scores exact phrase highly", () => {
-    expect(compareSpeech("Hola, ¿cómo estás?", "Hola, ¿cómo estás?")).toBe(100);
-  });
-
-  it("scores partial matches proportionally", () => {
-    expect(compareSpeech("Hola estás", "Hola cómo estás")).toBeGreaterThan(0);
-    expect(compareSpeech("Hola estás", "Hola cómo estás")).toBeLessThan(100);
-  });
-});
-
-describe("normalizeSpeech", () => {
-  it("removes punctuation", () => {
-    expect(normalizeSpeech("¡Hola!")).toBe("hola");
   });
 });
 
@@ -87,7 +68,7 @@ describe("parseProgressBackup", () => {
     });
     expect(backup.categories[0]?.unit).toBe(1);
     expect(backup.mistakes).toHaveLength(1);
-    expect(backup.settings.theme).toBe("dark");
+    expect(backup.settings.theme).toBe("system");
   });
 
   it("rejects invalid payloads", () => {

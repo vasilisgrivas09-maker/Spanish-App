@@ -5,7 +5,6 @@ import type {
   GenderQuestion,
   GrammarLesson,
   SentenceQuestion,
-  SpeakingPhrase,
   TrapQuestion,
 } from "./types";
 
@@ -17,10 +16,24 @@ export const STORAGE_KEY_SETTINGS = "spanish_settings_v1" as const;
 export const PRESET_COLORS: readonly string[] = ["#FF6B35", "#4ECDC4", "#FFD93D", "#FF8B94", "#C3B1E1", "#87CEEB", "#98D8C8", "#A8E6CF"];
 
 export const CATEGORY_ICONS: Record<string, string> = {
-      travel: "✈", city: "▣", school: "▤", weather: "☀", food: "◉", phrases: "☏", greetings: "✋", opposites: "⇄",
-      u2_home: "⌂", u2_time: "◷", u2_transport: "▱", u2_sport: "●", u2_hobbies: "✦", u2_education: "▤",
-      u2_restaurant: "◒", u2_expressions: "♪", u2_nature: "◌"
-    };
+  travel: "✈",
+  city: "🏙",
+  school: "📚",
+  weather: "🌤",
+  food: "🛒",
+  phrases: "💬",
+  greetings: "👋",
+  opposites: "⇄",
+  u2_home: "🏠",
+  u2_time: "⏰",
+  u2_transport: "🚌",
+  u2_sport: "⚽",
+  u2_hobbies: "🎨",
+  u2_education: "🎓",
+  u2_restaurant: "🍽",
+  u2_expressions: "💡",
+  u2_nature: "🌳",
+};
 
 export const GRAMMAR_LESSONS: GrammarLesson[] = [
       {
@@ -154,7 +167,7 @@ export const DIALOGUES: Dialogue[] = [
           {es:"Soy estudiante.", gr:"Είμαι μαθητής."}
         ]}
       ]},
-      { id:"travel", icon:"✈️", title:"Στο ταξίδι", subtitle:"Ρωτάς για τον δρόμο", turns:[
+      { id:"directions", icon:"✈️", title:"Στο ταξίδι", subtitle:"Ρωτάς για τον δρόμο", turns:[
         { speaker:"Tú", es:"Perdón, ¿dónde está la estación?", gr:"Συγγνώμη, πού είναι ο σταθμός;", choices:[
           {es:"¿Está cerca?", gr:"Είναι κοντά;", correct:true},
           {es:"Quiero una naranja.", gr:"Θέλω ένα πορτοκάλι."},
@@ -214,17 +227,6 @@ export const DIALOGUES: Dialogue[] = [
           {es:"Buenas noches.", gr:"Καληνύχτα."}
         ]}
       ]}
-    ];
-
-export const SPEAKING_PHRASES: SpeakingPhrase[] = [
-      { es:"Hola, ¿cómo estás?", gr:"Γεια, πώς είσαι;", focus:"h" },
-      { es:"Quiero un café, por favor.", gr:"Θέλω έναν καφέ, παρακαλώ.", focus:"r" },
-      { es:"La habitación está a la derecha.", gr:"Το δωμάτιο είναι στα δεξιά.", focus:"rr" },
-      { es:"Me llamo María y soy de Grecia.", gr:"Με λένε Μαρία και είμαι από την Ελλάδα.", focus:"ll" },
-      { es:"¿Dónde está la estación?", gr:"Πού είναι ο σταθμός;", focus:"d" },
-      { es:"Necesito comprar una botella de agua.", gr:"Χρειάζομαι να αγοράσω ένα μπουκάλι νερό.", focus:"r" },
-      { es:"No entiendo, ¿puede repetir?", gr:"Δεν καταλαβαίνω, μπορείτε να επαναλάβετε;", focus:"r" },
-      { es:"Muchas gracias por tu ayuda.", gr:"Ευχαριστώ πολύ για τη βοήθειά σου.", focus:"j" }
     ];
 
 export const SENTENCE_QUESTIONS: SentenceQuestion[] = [

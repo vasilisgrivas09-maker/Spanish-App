@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "next build --webpack",
+    "build": "next build",
     "dev": "next dev --turbopack",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "next": "16.3.5",
@@ -17,8 +18,8 @@
     "zod": "^4.6.4"
   },
   "devDependencies": {
-    "@ducanh2912/next-pwa": "^10.2.9",
-    "@types/dom-speech-recognition": "^0.0.12",
+    "@playwright/test": "^1.63.0",
+    "@serwist/turbopack": "^9.5.12",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
@@ -26,6 +27,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.5",
     "jsdom": "^30.0.1",
+    "serwist": "^9.5.12",
     "typescript": "^5",
     "vitest": "^3.2.4"
   }
