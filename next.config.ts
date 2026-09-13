@@ -5,8 +5,13 @@ const withPWA = withPWAInit({
   dest: "public",
   disable: process.env.NODE_ENV === "development",
   register: true,
-  fallbacks: {
-    document: "/",
+  workboxOptions: {
+    navigateFallbackDenylist: [
+      /^\/_next\//,
+      /^\/favicon/,
+      /^\/icons\//,
+      /^\/.*\.(?:ico|png|jpg|jpeg|svg|webmanifest|js|css|txt|xml)$/,
+    ],
   },
 });
 
