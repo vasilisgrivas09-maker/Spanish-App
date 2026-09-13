@@ -26,7 +26,7 @@ npm run dev
 - `src/app` — App Router shell, metadata, CSS
 - `src/components/SpanishCourseApp.tsx` — client mount
 - `src/lib/course/data.ts` — λεξιλόγιο / γραμματική / διάλογοι
-- `src/lib/course/mount-app.ts` — πιστή λογική UI/quiz (ίδια συμπεριφορά με το HTML)
+- `src/lib/course/mount-app.ts` — πιστή λογική UI/quiz
 - `src/lib/course/utils.ts` + `backup.ts` — typed helpers + Zod validation
 - `public/manifest.webmanifest` + icons — PWA
 
