@@ -1,0 +1,24 @@
+{
+  "name": "Español Course",
+  "short_name": "Español",
+  "description": "Μάθημα Ισπανικών με quizzes, διαλόγους και προφορική εξάσκηση.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#070714",
+  "theme_color": "#070714",
+  "lang": "el",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
